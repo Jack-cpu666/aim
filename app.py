@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, request
 from datetime import datetime
 import json
 
@@ -85,6 +85,9 @@ zones_data = {
     ]
 }
 
+# Custom zones added by users
+custom_zones = {}
+
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -137,6 +140,23 @@ HTML_TEMPLATE = '''
             opacity: 0.95;
         }
 
+        .add-tag-btn {
+            background: rgba(0,0,0,0.3);
+            border: 2px solid rgba(255,255,255,0.3);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .add-tag-btn:hover {
+            background: rgba(255,255,255,0.2);
+            border-color: white;
+        }
+
         .progress-container {
             background: rgba(0,0,0,0.3);
             border-radius: 10px;
@@ -173,7 +193,7 @@ HTML_TEMPLATE = '''
             gap: 8px;
             border-bottom: 2px solid rgba(255,255,255,0.1);
             position: sticky;
-            top: 140px;
+            top: 170px;
             z-index: 90;
             backdrop-filter: blur(10px);
         }
@@ -238,6 +258,11 @@ HTML_TEMPLATE = '''
             position: relative;
             overflow: hidden;
             transition: all 0.3s;
+        }
+
+        .zone-card.custom {
+            background: linear-gradient(135deg, #3e2a3e 0%, #2e1a2e 100%);
+            border-color: rgba(255,107,53,0.3);
         }
 
         .zone-card::before {
@@ -374,6 +399,12 @@ HTML_TEMPLATE = '''
             border: 1px solid #ff6b35;
         }
 
+        .status-badge.custom {
+            background: rgba(156, 39, 176, 0.2);
+            color: #9c27b0;
+            border: 1px solid #9c27b0;
+        }
+
         .modal {
             display: none;
             position: fixed;
@@ -422,6 +453,65 @@ HTML_TEMPLATE = '''
         @keyframes nfcPulse {
             0%, 100% { transform: scale(1); border-color: #ff6b35; }
             50% { transform: scale(1.1); border-color: #ff4500; }
+        }
+
+        .add-tag-modal .modal-content {
+            text-align: left;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #ff6b35;
+            font-weight: 600;
+        }
+
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 12px;
+            background: rgba(255,255,255,0.1);
+            border: 2px solid rgba(255,255,255,0.2);
+            border-radius: 8px;
+            color: white;
+            font-size: 16px;
+        }
+
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: #ff6b35;
+            background: rgba(255,255,255,0.15);
+        }
+
+        .modal-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: space-between;
+            margin-top: 20px;
+        }
+
+        .modal-buttons button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-cancel {
+            background: rgba(255,255,255,0.1);
+            color: white;
+        }
+
+        .btn-save {
+            background: linear-gradient(135deg, #ff6b35, #ff4500);
+            color: white;
         }
 
         .error-message {
@@ -474,7 +564,10 @@ HTML_TEMPLATE = '''
 <body>
     <div class="header">
         <h1>🏢 Plaza 555 Security Tour</h1>
-        <div class="tour-name">Grave Shift Daily Tour - Interior/Parking</div>
+        <div class="tour-info">
+            <div class="tour-name">Grave Shift Daily Tour - Interior/Parking</div>
+            <button class="add-tag-btn" onclick="openAddTagModal()">➕ Add Custom Tag</button>
+        </div>
         <div class="progress-container">
             <div class="progress-text">Progress: <span id="progressText">0%</span> (<span id="visitedCount">0</span>/<span id="totalCount">0</span> zones)</div>
             <div class="progress-bar">
@@ -502,22 +595,25 @@ HTML_TEMPLATE = '''
 
     {% for floor, zones in zones_data.items() %}
     <div class="tab-content {% if loop.first %}active{% endif %}" id="tab-{{ floor }}">
-        {% for zone in zones %}
-        <div class="zone-card" id="zone-{{ zone.id }}">
-            <div class="zone-header">
-                <div class="zone-title">Plaza 555 - Main Building</div>
-                <div class="nfc-id">NFC: {{ zone.id }}</div>
+        <div id="zones-{{ floor.replace(' ', '-') }}">
+            {% for zone in zones %}
+            <div class="zone-card" id="zone-{{ zone.id }}">
+                <div class="zone-header">
+                    <div class="zone-title">Plaza 555 - Main Building</div>
+                    <div class="nfc-id">NFC: {{ zone.id }}</div>
+                </div>
+                <div class="zone-location">📍 {{ floor }} > {{ zone.location }}</div>
+                <button class="write-btn" onclick="writeNFC('{{ zone.id }}', '{{ floor }}', '{{ zone.location }}')">
+                    📱 Write to NFC Tag
+                </button>
+                <span class="status-badge not-visited" id="status-{{ zone.id }}">Not Visited</span>
             </div>
-            <div class="zone-location">📍 {{ floor }} > {{ zone.location }}</div>
-            <button class="write-btn" onclick="writeNFC('{{ zone.id }}', '{{ floor }}', '{{ zone.location }}')">
-                📱 Write to NFC Tag
-            </button>
-            <span class="status-badge not-visited" id="status-{{ zone.id }}">Not Visited</span>
+            {% endfor %}
         </div>
-        {% endfor %}
     </div>
     {% endfor %}
 
+    <!-- NFC Write Modal -->
     <div class="modal" id="nfcModal">
         <div class="modal-content">
             <h2 style="color: #ff6b35; margin-bottom: 20px;">NFC Write Operation</h2>
@@ -527,12 +623,40 @@ HTML_TEMPLATE = '''
         </div>
     </div>
 
+    <!-- Add Tag Modal -->
+    <div class="modal add-tag-modal" id="addTagModal">
+        <div class="modal-content">
+            <h2 style="color: #ff6b35; margin-bottom: 20px;">Add Custom NFC Tag</h2>
+            <div class="form-group">
+                <label for="tagId">Tag ID (10-digit number)</label>
+                <input type="text" id="tagId" placeholder="e.g., 10151999" maxlength="8" pattern="[0-9]{8}">
+            </div>
+            <div class="form-group">
+                <label for="tagLocation">Location Name</label>
+                <input type="text" id="tagLocation" placeholder="e.g., Security Office">
+            </div>
+            <div class="form-group">
+                <label for="tagFloor">Floor</label>
+                <select id="tagFloor">
+                    {% for floor in zones_data.keys() %}
+                    <option value="{{ floor }}">{{ floor }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn-cancel" onclick="closeAddTagModal()">Cancel</button>
+                <button class="btn-save" onclick="saveCustomTag()">Save Tag</button>
+            </div>
+        </div>
+    </div>
+
     <div class="error-message" id="errorMessage"></div>
 
     <script>
         let currentTab = '{{ zones_data.keys()|first }}';
         let visitedZones = new Set();
-        const totalZones = {{ zones_data.values()|map('list')|sum|length }};
+        let totalZones = {{ total_zones }};
+        let customZonesData = {};
 
         function showTab(floor) {
             // Hide all tabs
@@ -678,11 +802,95 @@ HTML_TEMPLATE = '''
             document.getElementById('nfcModal').classList.remove('active');
         }
 
+        function openAddTagModal() {
+            document.getElementById('addTagModal').classList.add('active');
+        }
+
+        function closeAddTagModal() {
+            document.getElementById('addTagModal').classList.remove('active');
+            // Clear form
+            document.getElementById('tagId').value = '';
+            document.getElementById('tagLocation').value = '';
+        }
+
+        function saveCustomTag() {
+            const tagId = document.getElementById('tagId').value;
+            const tagLocation = document.getElementById('tagLocation').value;
+            const tagFloor = document.getElementById('tagFloor').value;
+            
+            if (!tagId || !tagLocation) {
+                showError('Please fill in all fields');
+                return;
+            }
+            
+            if (!/^\d{8}$/.test(tagId)) {
+                showError('Tag ID must be exactly 8 digits');
+                return;
+            }
+            
+            // Send to server
+            fetch('/add_custom_tag', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    id: tagId,
+                    location: tagLocation,
+                    floor: tagFloor
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Add to current floor
+                    addTagToFloor(tagId, tagLocation, tagFloor);
+                    closeAddTagModal();
+                    showTab(tagFloor);
+                    totalZones++;
+                    updateProgress();
+                    showSuccess('Custom tag added successfully!');
+                } else {
+                    showError('Failed to add tag');
+                }
+            });
+        }
+
+        function addTagToFloor(tagId, location, floor) {
+            const floorContainer = document.getElementById('zones-' + floor.replace(' ', '-'));
+            if (floorContainer) {
+                const newCard = document.createElement('div');
+                newCard.className = 'zone-card custom';
+                newCard.id = 'zone-' + tagId;
+                newCard.innerHTML = `
+                    <div class="zone-header">
+                        <div class="zone-title">Plaza 555 - Custom Zone</div>
+                        <div class="nfc-id">NFC: ${tagId}</div>
+                    </div>
+                    <div class="zone-location">📍 ${floor} > ${location}</div>
+                    <button class="write-btn" onclick="writeNFC('${tagId}', '${floor}', '${location}')">
+                        📱 Write to NFC Tag
+                    </button>
+                    <span class="status-badge custom" id="status-${tagId}">Custom Tag - Not Visited</span>
+                `;
+                floorContainer.appendChild(newCard);
+            }
+        }
+
         function showError(message) {
             const errorEl = document.getElementById('errorMessage');
             errorEl.textContent = message;
             errorEl.classList.add('show');
             setTimeout(() => errorEl.classList.remove('show'), 5000);
+        }
+
+        function showSuccess(message) {
+            const errorEl = document.getElementById('errorMessage');
+            errorEl.textContent = message;
+            errorEl.style.background = 'linear-gradient(135deg, #4CAF50, #8BC34A)';
+            errorEl.classList.add('show');
+            setTimeout(() => {
+                errorEl.classList.remove('show');
+                errorEl.style.background = '';
+            }, 5000);
         }
 
         // Initialize on load
@@ -697,12 +905,26 @@ HTML_TEMPLATE = '''
                     showError('Web NFC is best supported on mobile devices with Chrome browser.');
                 }
             }
+            
+            // Load custom zones
+            fetch('/get_custom_tags')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.tags) {
+                        data.tags.forEach(tag => {
+                            addTagToFloor(tag.id, tag.location, tag.floor);
+                        });
+                        totalZones += data.tags.length;
+                        updateProgress();
+                    }
+                });
         });
 
         // Handle keyboard shortcuts
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
                 closeModal();
+                closeAddTagModal();
             }
         });
     </script>
@@ -712,7 +934,9 @@ HTML_TEMPLATE = '''
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, zones_data=zones_data)
+    # Calculate total zones properly
+    total = sum(len(zones) for zones in zones_data.values())
+    return render_template_string(HTML_TEMPLATE, zones_data=zones_data, total_zones=total)
 
 @app.route('/mark_visited', methods=['POST'])
 def mark_visited():
@@ -724,6 +948,47 @@ def mark_visited():
             'visited': True
         }
     return jsonify({'success': True, 'zone_id': zone_id})
+
+@app.route('/add_custom_tag', methods=['POST'])
+def add_custom_tag():
+    data = request.get_json()
+    tag_id = data.get('id')
+    location = data.get('location')
+    floor = data.get('floor')
+    
+    if tag_id and location and floor:
+        if floor not in custom_zones:
+            custom_zones[floor] = []
+        
+        custom_zones[floor].append({
+            'id': tag_id,
+            'location': location,
+            'visited': False
+        })
+        
+        # Also add to main zones_data for persistence
+        if floor in zones_data:
+            zones_data[floor].append({
+                'id': tag_id,
+                'location': location,
+                'visited': False
+            })
+        
+        return jsonify({'success': True, 'tag': {'id': tag_id, 'location': location, 'floor': floor}})
+    
+    return jsonify({'success': False, 'error': 'Missing required fields'})
+
+@app.route('/get_custom_tags')
+def get_custom_tags():
+    all_custom = []
+    for floor, tags in custom_zones.items():
+        for tag in tags:
+            all_custom.append({
+                'id': tag['id'],
+                'location': tag['location'],
+                'floor': floor
+            })
+    return jsonify({'tags': all_custom})
 
 @app.route('/status')
 def status():
