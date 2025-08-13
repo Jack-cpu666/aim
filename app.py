@@ -600,11 +600,11 @@ HTML_TEMPLATE = '''
             <div class="zone-card" id="zone-{{ zone.id }}">
                 <div class="zone-header">
                     <div class="zone-title">Plaza 555 - Main Building</div>
-                    <div class="nfc-id">NFC: {{ zone.id }}</div>
+                    <div class="nfc-id" title="This ID will be written to the NFC tag">NFC: {{ zone.id }}</div>
                 </div>
                 <div class="zone-location">📍 {{ floor }} > {{ zone.location }}</div>
                 <button class="write-btn" onclick="writeNFC('{{ zone.id }}', '{{ floor }}', '{{ zone.location }}')">
-                    📱 Write to NFC Tag
+                    📱 Write "{{ zone.id }}" to NFC Tag
                 </button>
                 <span class="status-badge not-visited" id="status-{{ zone.id }}">Not Visited</span>
             </div>
@@ -618,7 +618,7 @@ HTML_TEMPLATE = '''
         <div class="modal-content">
             <h2 style="color: #ff6b35; margin-bottom: 20px;">NFC Write Operation</h2>
             <div class="nfc-icon">📡</div>
-            <p id="modalMessage" style="margin-bottom: 20px;">Hold your NFC tag near the device...</p>
+            <p id="modalMessage" style="margin-bottom: 20px;">Hold your NFC tag near the device to write the zone ID...</p>
             <button class="write-btn" onclick="closeModal()">Cancel</button>
         </div>
     </div>
@@ -686,69 +686,147 @@ HTML_TEMPLATE = '''
             const btn = card.querySelector('.write-btn');
             const statusBadge = document.getElementById('status-' + zoneId);
             
-            if ('NDEFReader' in window) {
-                try {
-                    // Show modal
-                    document.getElementById('nfcModal').classList.add('active');
-                    btn.classList.add('writing');
-                    btn.innerHTML = '⏳ Writing...';
-                    
-                    const ndef = new NDEFReader();
-                    const abortController = new AbortController();
-                    
-                    // Set timeout for write operation
-                    setTimeout(() => abortController.abort(), 10000);
-                    
-                    await ndef.write({
-                        records: [{
-                            recordType: "text",
-                            data: JSON.stringify({
-                                zoneId: zoneId,
-                                floor: floor,
-                                location: location,
-                                timestamp: new Date().toISOString(),
-                                building: "Plaza 555"
-                            })
-                        }]
-                    }, { signal: abortController.signal });
-                    
-                    // Success
-                    markAsVisited(zoneId, card, btn, statusBadge);
-                    document.getElementById('modalMessage').textContent = '✅ Successfully written!';
-                    
-                    setTimeout(() => {
-                        closeModal();
-                    }, 1500);
-                    
-                } catch (error) {
-                    console.error('NFC Write failed:', error);
-                    handleNFCError(error, btn);
-                }
-            } else if (/iPhone|iPad|iPod/.test(navigator.userAgent)) {
-                // iOS fallback - simulate write for demo
+            // Check for Web NFC support
+            if (!('NDEFReader' in window)) {
+                showError('Web NFC is not supported. Please use Chrome on Android with NFC enabled.');
+                return;
+            }
+            
+            try {
+                // Show modal
                 document.getElementById('nfcModal').classList.add('active');
+                btn.classList.add('writing');
+                btn.innerHTML = '⏳ Initializing NFC...';
+                
+                const ndef = new NDEFReader();
+                
+                // First, we need to scan to detect a tag
+                btn.innerHTML = '⏳ Scanning for tag...';
                 document.getElementById('modalMessage').innerHTML = `
-                    <strong>NFC Tag: ${zoneId}</strong><br>
-                    <small>iOS requires native app for NFC writing</small><br>
-                    <small>Simulating write operation...</small>
+                    <strong>Ready to write: ${zoneId}</strong><br>
+                    Hold your NFC tag near the device...
                 `;
                 
-                btn.classList.add('writing');
-                btn.innerHTML = '⏳ Writing...';
+                // Start scanning for tags
+                await ndef.scan();
                 
-                // Simulate write delay
-                setTimeout(() => {
-                    markAsVisited(zoneId, card, btn, statusBadge);
-                    document.getElementById('modalMessage').textContent = '✅ Simulated write complete!';
-                    setTimeout(() => closeModal(), 1500);
-                }, 2000);
-            } else {
-                showError('NFC is not supported on this device. Please use Chrome on Android or a compatible browser.');
+                // Set up one-time listener for when tag is detected
+                await new Promise((resolve, reject) => {
+                    const abortController = new AbortController();
+                    const timeout = setTimeout(() => {
+                        abortController.abort();
+                        reject(new Error('Timeout waiting for tag'));
+                    }, 30000); // 30 second timeout
+                    
+                    ndef.addEventListener('reading', async (event) => {
+                        clearTimeout(timeout);
+                        btn.innerHTML = '⏳ Writing to tag...';
+                        document.getElementById('modalMessage').innerHTML = `
+                            <strong>Tag detected!</strong><br>
+                            Writing: ${zoneId}
+                        `;
+                        
+                        try {
+                            // Simple write - just the zone ID number
+                            await ndef.write(zoneId);
+                            
+                            // Success!
+                            btn.innerHTML = '✅ WRITTEN!';
+                            document.getElementById('modalMessage').innerHTML = `
+                                <strong style="color: #4CAF50;">✅ Successfully Written!</strong><br>
+                                NFC Tag ID: <span style="font-family: monospace; font-size: 20px;">${zoneId}</span><br>
+                                <small>${location} - ${new Date().toLocaleTimeString()}</small>
+                            `;
+                            
+                            markAsVisited(zoneId, card, btn, statusBadge);
+                            
+                            setTimeout(() => {
+                                closeModal();
+                            }, 2000);
+                            
+                            resolve();
+                        } catch (writeError) {
+                            reject(writeError);
+                        }
+                    }, { once: true, signal: abortController.signal });
+                    
+                    ndef.addEventListener('readingerror', () => {
+                        clearTimeout(timeout);
+                        reject(new Error('Tag reading error - try a different tag'));
+                    }, { once: true, signal: abortController.signal });
+                });
                 
-                // Fallback for testing - mark as visited on click
-                if (confirm('NFC not available. Mark as visited for testing?')) {
-                    markAsVisited(zoneId, card, btn, statusBadge);
+            } catch (error) {
+                console.error('NFC operation failed:', error);
+                btn.classList.remove('writing');
+                btn.innerHTML = '📱 Write to NFC Tag';
+                closeModal();
+                
+                if (error.name === 'NotAllowedError') {
+                    showError('NFC permission denied. Please allow NFC access and try again.');
+                } else if (error.name === 'AbortError' || error.message.includes('Timeout')) {
+                    showError('NFC operation timed out. Make sure NFC is enabled and try again.');
+                } else if (error.name === 'NotSupportedError') {
+                    showError('Your device does not support NFC or it is disabled.');
+                } else if (error.name === 'SecurityError') {
+                    showError('NFC requires HTTPS. Please use a secure connection.');
+                } else if (error.name === 'NetworkError') {
+                    showError('NFC hardware error. Check if NFC is enabled in your device settings.');
+                } else {
+                    showError(`NFC Error: ${error.message}`);
                 }
+            }
+        }
+                }
+            }
+        }
+        
+        // Optional: Add NFC reading capability to verify writes
+        async function readNFC() {
+            if (!('NDEFReader' in window)) {
+                showError('Web NFC is not supported on this device.');
+                return;
+            }
+            
+            try {
+                const ndef = new NDEFReader();
+                await ndef.scan();
+                
+                ndef.addEventListener('reading', event => {
+                    const decoder = new TextDecoder();
+                    
+                    for (const record of event.message.records) {
+                        console.log('Record type:', record.recordType);
+                        
+                        // Read the zone ID from the tag
+                        const data = decoder.decode(record.data);
+                        console.log('Tag data:', data);
+                        
+                        // Check if this matches one of our zone IDs (8 digits starting with 10)
+                        if (/^10\d{6}$/.test(data)) {
+                            const card = document.getElementById('zone-' + data);
+                            if (card) {
+                                showSuccess(`✅ Tag verified: Zone ${data}`);
+                                
+                                // Auto-mark as visited if not already
+                                if (!card.classList.contains('visited')) {
+                                    const btn = card.querySelector('.write-btn');
+                                    const statusBadge = document.getElementById('status-' + data);
+                                    markAsVisited(data, card, btn, statusBadge);
+                                }
+                            } else {
+                                showSuccess(`Tag read: ${data} (not in current tour)`);
+                            }
+                        }
+                    }
+                });
+                
+                ndef.addEventListener('readingerror', () => {
+                    showError('Cannot read data from the NFC tag.');
+                });
+                
+            } catch (error) {
+                showError(`Read error: ${error.message}`);
             }
         }
 
@@ -756,7 +834,7 @@ HTML_TEMPLATE = '''
             card.classList.add('visited');
             btn.classList.remove('writing');
             btn.classList.add('success');
-            btn.innerHTML = '✅ WRITTEN';
+            btn.innerHTML = `✅ "${zoneId}" WRITTEN`;
             statusBadge.textContent = 'Visited at ' + new Date().toLocaleTimeString();
             statusBadge.classList.remove('not-visited');
             statusBadge.classList.add('visited');
@@ -773,19 +851,7 @@ HTML_TEMPLATE = '''
             });
         }
 
-        function handleNFCError(error, btn) {
-            btn.classList.remove('writing');
-            btn.innerHTML = '📱 Write to NFC Tag';
-            closeModal();
-            
-            if (error.name === 'AbortError') {
-                showError('NFC write timeout. Please try again.');
-            } else if (error.name === 'NotAllowedError') {
-                showError('NFC permission denied. Please enable NFC in your browser settings.');
-            } else {
-                showError('NFC write failed: ' + error.message);
-            }
-        }
+
 
         function updateProgress() {
             const visited = visitedZones.size;
@@ -867,7 +933,7 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="zone-location">📍 ${floor} > ${location}</div>
                     <button class="write-btn" onclick="writeNFC('${tagId}', '${floor}', '${location}')">
-                        📱 Write to NFC Tag
+                        📱 Write "${tagId}" to NFC Tag
                     </button>
                     <span class="status-badge custom" id="status-${tagId}">Custom Tag - Not Visited</span>
                 `;
@@ -894,15 +960,56 @@ HTML_TEMPLATE = '''
         }
 
         // Initialize on load
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', async function() {
             updateProgress();
             updateFloorStats(currentTab);
             
-            // Check for NFC support
-            if (!('NDEFReader' in window)) {
-                console.log('Web NFC API not supported.');
-                if (!/iPhone|iPad|iPod|Android/.test(navigator.userAgent)) {
-                    showError('Web NFC is best supported on mobile devices with Chrome browser.');
+            // Check for NFC support and capabilities
+            if ('NDEFReader' in window) {
+                console.log('✅ Web NFC API is supported!');
+                
+                // Check if we're on HTTPS (required for Web NFC)
+                if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+                    showError('Web NFC requires HTTPS. Please use a secure connection.');
+                }
+                
+                // Add NFC status indicator
+                const header = document.querySelector('.header');
+                const nfcStatus = document.createElement('div');
+                nfcStatus.style.cssText = 'background: rgba(0,0,0,0.3); padding: 8px; border-radius: 8px; margin-top: 10px; font-size: 12px;';
+                nfcStatus.innerHTML = `
+                    <span style="color: #4CAF50;">✅ NFC Ready</span> | 
+                    <button onclick="startContinuousRead()" style="background: #4CAF50; border: none; color: white; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin: 0 4px;">
+                        📡 Start Reading Mode
+                    </button>
+                    <button onclick="testReadTag()" style="background: #2196F3; border: none; color: white; padding: 4px 8px; border-radius: 4px; cursor: pointer;">
+                        🔍 Test Read Tag
+                    </button>
+                `;
+                header.appendChild(nfcStatus);
+                
+                // Try to request NFC permission early (Chrome 89+)
+                if ('permissions' in navigator) {
+                    try {
+                        const nfcPermission = await navigator.permissions.query({ name: 'nfc' });
+                        console.log('NFC permission status:', nfcPermission.state);
+                        
+                        if (nfcPermission.state === 'denied') {
+                            showError('NFC permission denied. Please enable NFC in your browser settings.');
+                        }
+                    } catch (e) {
+                        console.log('Could not check NFC permission:', e);
+                    }
+                }
+            } else {
+                console.log('❌ Web NFC API not supported.');
+                
+                if (/iPhone|iPad|iPod/.test(navigator.userAgent)) {
+                    showError('iOS does not support Web NFC. Consider using an Android device with Chrome.');
+                } else if (!/Android/.test(navigator.userAgent)) {
+                    showError('Web NFC requires Chrome on Android. Please use a compatible device.');
+                } else {
+                    showError('Web NFC not available. Make sure you are using Chrome and NFC is enabled.');
                 }
             }
             
@@ -919,6 +1026,104 @@ HTML_TEMPLATE = '''
                     }
                 });
         });
+        
+        // Test read a single tag
+        async function testReadTag() {
+            if (!('NDEFReader' in window)) {
+                showError('NFC not supported');
+                return;
+            }
+            
+            try {
+                const ndef = new NDEFReader();
+                await ndef.scan();
+                
+                showSuccess('📡 Hold an NFC tag near the device to read...');
+                
+                ndef.addEventListener('reading', event => {
+                    const decoder = new TextDecoder();
+                    let tagContent = '';
+                    
+                    for (const record of event.message.records) {
+                        const data = decoder.decode(record.data);
+                        tagContent += data + ' ';
+                    }
+                    
+                    // Display what's on the tag
+                    alert(`NFC Tag Content:\n${tagContent.trim()}\n\nType: ${event.message.records[0].recordType}`);
+                    
+                    // Check if it's one of our zones
+                    const zoneMatch = tagContent.match(/10\d{6}/);
+                    if (zoneMatch) {
+                        showSuccess(`Zone tag detected: ${zoneMatch[0]}`);
+                    }
+                }, { once: true });
+                
+                ndef.addEventListener('readingerror', () => {
+                    showError('Cannot read this NFC tag');
+                }, { once: true });
+                
+            } catch (error) {
+                showError('Read failed: ' + error.message);
+            }
+        }
+        
+        // Continuous read mode for quick scanning
+        let continuousReadActive = false;
+        async function startContinuousRead() {
+            if (!('NDEFReader' in window)) {
+                showError('NFC not supported');
+                return;
+            }
+            
+            if (continuousReadActive) {
+                showError('Reading mode already active');
+                return;
+            }
+            
+            try {
+                const ndef = new NDEFReader();
+                await ndef.scan();
+                continuousReadActive = true;
+                
+                showSuccess('📡 NFC Reading Mode Active - Tap any tag to read');
+                
+                ndef.addEventListener('reading', event => {
+                    const decoder = new TextDecoder();
+                    
+                    for (const record of event.message.records) {
+                        const data = decoder.decode(record.data).trim();
+                        
+                        // Check if it's a zone ID (8 digits starting with 10)
+                        if (/^10\d{6}$/.test(data)) {
+                            // Find the zone card
+                            const card = document.getElementById('zone-' + data);
+                            if (card && !card.classList.contains('visited')) {
+                                const btn = card.querySelector('.write-btn');
+                                const statusBadge = document.getElementById('status-' + data);
+                                markAsVisited(data, card, btn, statusBadge);
+                                
+                                // Get location from the card
+                                const locationText = card.querySelector('.zone-location').textContent;
+                                showSuccess(`✅ Verified: ${data} - ${locationText}`);
+                            } else if (card && card.classList.contains('visited')) {
+                                showSuccess(`Tag ${data} already visited`);
+                            } else {
+                                showSuccess(`Tag read: ${data} (not in current tour)`);
+                            }
+                        }
+                    }
+                });
+                
+                ndef.addEventListener('readingerror', () => {
+                    console.log('NFC read error - incompatible tag');
+                });
+                
+            } catch (error) {
+                continuousReadActive = false;
+                showError('Failed to start reading mode: ' + error.message);
+            }
+        }
 
         // Handle keyboard shortcuts
         document.addEventListener('keydown', function(e) {
