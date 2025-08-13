@@ -1,5 +1,5 @@
 Flask>=3,<4
-gunicorn>=21,<23
-mediapipe
-opencv-python-headless>=4.9
-numpy>=1.26
+gunicorn>=22,<23
+opencv-python-headless>=4.9,<4.11
+mediapipe==0.10.9
+numpy>=1.24,<2
