@@ -4,14 +4,12 @@ from datetime import datetime
 app = Flask(__name__)
 
 # In-memory state (use a real DB in production)
-visited_zones = {}  # {zone_id: {"timestamp": "...", "visited": True}}
-custom_zones = {}   # {floor: [{"id": "...", "location": "...", "visited": False}, ...]}
+visited_zones = {}
+custom_zones = {}
 
 # Zones organized by floor
 zones_data = {
-    'Basement': [
-        {'id': '10151853', 'location': 'Basement Interior', 'visited': False}
-    ],
+    'Basement': [{'id': '10151853', 'location': 'Basement Interior', 'visited': False}],
     'Floor 2': [
         {'id': '10151808', 'location': 'Catwalk Stairwell', 'visited': False},
         {'id': '10150864', 'location': 'East Stairwell', 'visited': False},
@@ -77,13 +75,18 @@ zones_data = {
         {'id': '10151837', 'location': '15th Floor', 'visited': False},
         {'id': '10151827', 'location': 'Alley Stairwell', 'visited': False}
     ],
-    'Floor 16': [
-        {'id': '10151847', 'location': 'Penthouse', 'visited': False}
-    ],
-    'Floor 17': [
-        {'id': '10150879', 'location': 'Floor 17', 'visited': False}
-    ]
+    'Floor 16': [{'id': '10151847', 'location': 'Penthouse', 'visited': False}],
+    'Floor 17': [{'id': '10150879', 'location': 'Floor 17', 'visited': False}]
 }
+
+# Allow Web NFC on this origin (some hosts block it by default)
+@app.after_request
+def add_headers(resp):
+    # Allow only this origin to use NFC
+    resp.headers['Permissions-Policy'] = 'nfc=(self)'
+    # (Optional) prevent embedding that could disable features in iframes
+    resp.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    return resp
 
 HTML = """
 <!doctype html>
@@ -115,9 +118,17 @@ HTML = """
   .status { font-size:12px; color:var(--muted); }
   .status.ok { color:#86efac; }
   .toast { position:fixed; left:50%; transform:translateX(-50%); bottom:16px; background:#0f172a; color:white;
-           border:1px solid #334155; padding:10px 12px; border-radius:8px; display:none; }
+           border:1px solid #334155; padding:10px 12px; border-radius:8px; display:none; z-index:1000; }
   form.add { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
   .hint { font-size:12px; color:var(--muted); margin-left:auto; }
+
+  /* NFC sheet */
+  .sheet { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; z-index:999; }
+  .sheet .box { width:min(420px,92vw); background:#0f172a; border:1px solid #243042; border-radius:12px; padding:18px; }
+  .sheet h3 { margin:0 0 10px; font-size:18px; }
+  .sheet p { margin:8px 0; color:#cbd5e1; font-size:14px; }
+  .sheet .id { color:var(--accent); }
+  .sheet .row { margin-top:12px; justify-content:flex-end; }
 </style>
 </head>
 <body>
@@ -181,6 +192,18 @@ HTML = """
 
 <div class="toast" id="toast"></div>
 
+<!-- NFC status sheet -->
+<div class="sheet" id="nfcSheet">
+  <div class="box">
+    <h3 id="sheetTitle">Writing to tag…</h3>
+    <p id="sheetMsg">Hold the NFC tag against the phone to write<br>Value: <span class="id" id="sheetId"></span></p>
+    <p id="sheetHint" style="font-size:12px; color:#94a3b8;">If nothing happens in ~20s, ensure NFC is ON and try a fresh tag.</p>
+    <div class="row">
+      <button id="sheetClose" onclick="closeSheet()">Close</button>
+    </div>
+  </div>
+</div>
+
 <script>
   // --- Simple state ---
   const totalZones = {{ total_zones }};
@@ -195,9 +218,8 @@ HTML = """
     el.style.display = 'block';
     el.style.borderColor = ok ? '#14532d' : '#334155';
     el.style.color = ok ? '#86efac' : 'white';
-    setTimeout(() => { el.style.display='none'; }, 2000);
+    setTimeout(() => { el.style.display='none'; }, 2200);
   }
-
   function updateProgress() {
     const v = visited.size;
     const pct = totalZones ? Math.round((v/totalZones)*100) : 0;
@@ -206,13 +228,11 @@ HTML = """
     document.getElementById('remainingCount').textContent = totalZones - v;
     document.getElementById('progressFill').style.width = pct + '%';
 
-    // Floor stats
     const cur = floorSelect.value;
     const cards = [...document.querySelectorAll('.card[data-floor="'+cur+'"]')];
     const ok = cards.filter(c => c.classList.contains('visited')).length;
     document.getElementById('floorStats').textContent = ok + '/' + cards.length;
   }
-
   function filterByFloor() {
     const cur = floorSelect.value;
     [...document.querySelectorAll('.card')].forEach(c => {
@@ -220,7 +240,6 @@ HTML = """
     });
     updateProgress();
   }
-
   function markVisited(zoneId) {
     visited.add(zoneId);
     const card = document.getElementById('zone-' + zoneId);
@@ -228,8 +247,6 @@ HTML = """
     if (card) card.classList.add('visited');
     if (status) { status.textContent = 'Visited at ' + new Date().toLocaleTimeString(); status.classList.add('ok'); }
     updateProgress();
-
-    // Notify server (fire-and-forget)
     fetch('/mark_visited', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
@@ -237,32 +254,78 @@ HTML = """
     }).catch(()=>{});
   }
 
-  // --- NFC write: the simple, reliable flow ---
+  // --- NFC sheet controls ---
+  const sheet = document.getElementById('nfcSheet');
+  const sheetTitle = document.getElementById('sheetTitle');
+  const sheetMsg = document.getElementById('sheetMsg');
+  const sheetId = document.getElementById('sheetId');
+  function openSheet(title, msg, idText='') {
+    sheetTitle.textContent = title;
+    sheetMsg.innerHTML = msg;
+    sheetId.textContent = idText;
+    sheet.style.display = 'flex';
+  }
+  function closeSheet(){ sheet.style.display='none'; }
+
+  // --- NFC write with explicit UI + timeout + nicer errors ---
+  const NFC_TIMEOUT_MS = 20000;
+
   async function writeNFC(zoneId) {
     const btn = document.querySelector('#zone-' + zoneId + ' .write');
+
     if (!('NDEFReader' in window)) {
       showToast('Web NFC not supported. Use Chrome on Android.', false);
       return;
     }
+    if (!window.isSecureContext) {
+      showToast('This page is not HTTPS (or localhost). NFC blocked.', false);
+      return;
+    }
+
+    // visible sheet
+    openSheet('Ready to write', 'Hold the NFC tag against the phone to write<br>Value: <span class="id" id="sheetId"></span>', zoneId);
+
+    let controller;
     try {
       btn.disabled = true;
-      btn.textContent = 'Hold tag to phone...';
+      btn.textContent = 'Hold tag to phone…';
+
+      controller = new AbortController();
+      const t = setTimeout(() => controller.abort('Timeout'), NFC_TIMEOUT_MS);
+
       const ndef = new NDEFReader();
-      await ndef.write(zoneId); // writes a text record
-      markVisited(zoneId);
+
+      // Write an explicit text record (more interoperable than implicit string)
+      await ndef.write(
+        { records: [{ recordType: 'text', data: zoneId }] },
+        { signal: controller.signal }
+      );
+
+      clearTimeout(t);
+
+      // Success UI
+      sheetTitle.textContent = '✅ Written!';
+      sheetMsg.innerHTML = 'Tag successfully written with<br>Value: <span class="id">'+escapeHtml(zoneId)+'</span>';
+      if (navigator.vibrate) navigator.vibrate(80);
       showToast('✅ Written: ' + zoneId, true);
-      btn.textContent = 'Write to NFC Tag';
+      markVisited(zoneId);
     } catch (err) {
-      console.error(err);
-      btn.textContent = 'Write to NFC Tag';
-      let msg = err && err.name ? err.name + ': ' + (err.message || '') : (err.message || 'NFC error');
-      if (err.name === 'NotAllowedError') msg = 'NFC permission denied. Try tapping again and allow.';
-      if (err.name === 'NotSupportedError') msg = 'Device/Browser does not support NFC or it is disabled.';
-      if (err.name === 'SecurityError') msg = 'Web NFC requires HTTPS (except http://localhost).';
-      if (err.name === 'NetworkError') msg = 'NFC hardware busy/unavailable. Toggle NFC and retry.';
+      // Map common errors to friendly text
+      let msg = 'NFC error.';
+      if (err === 'Timeout' || (err && (err.name === 'AbortError'))) msg = 'Timed out waiting for a tag. Make sure NFC is ON and tap a tag.';
+      else if (err && err.name === 'NotAllowedError') msg = 'NFC permission denied. Tap again and allow when prompted.';
+      else if (err && err.name === 'NotSupportedError') msg = 'Device/Browser does not support NFC or it is disabled.';
+      else if (err && err.name === 'SecurityError') msg = 'Web NFC requires HTTPS (or http://localhost).';
+      else if (err && err.name === 'NetworkError') msg = 'NFC hardware busy/unavailable. Toggle NFC and retry.';
+      else if (err && err.message) msg = err.message;
+
+      sheetTitle.textContent = '❌ Failed';
+      sheetMsg.textContent = msg;
       showToast('❌ ' + msg, false);
+      console.error('NFC write failed:', err);
     } finally {
       btn.disabled = false;
+      btn.textContent = 'Write to NFC Tag';
     }
   }
 
@@ -320,7 +383,6 @@ HTML = """
     const httpsOk = (location.protocol === 'https:') || (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
     if (!httpsOk) document.getElementById('envHint').textContent = '⚠️ Use HTTPS (or http://localhost) for NFC';
 
-    // Default to first floor
     const fs = document.getElementById('floorSelect');
     fs.value = fs.options[0].value;
     fs.addEventListener('change', filterByFloor);
@@ -329,7 +391,6 @@ HTML = """
     // Re-add any custom tags on reload
     fetch('/get_custom_tags').then(r=>r.json()).then(data=>{
       if (!data.tags) return;
-      const zoneList = document.getElementById('zoneList');
       for (const t of data.tags) {
         if (document.getElementById('zone-' + t.id)) continue;
         const card = document.createElement('div');
@@ -344,7 +405,7 @@ HTML = """
           </div>
           <div><button class="write" onclick="writeNFC('${escapeAttr(t.id)}')">Write to NFC Tag</button></div>
         `;
-        zoneList.appendChild(card);
+        document.getElementById('zoneList').appendChild(card);
       }
       filterByFloor();
     }).catch(()=>{});
