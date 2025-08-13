@@ -167,7 +167,7 @@ HTML = """
   <section style="margin-top:24px;">
     <h2 style="font-size:16px; margin:6px 0;">Add Custom Tag</h2>
     <form class="add" onsubmit="return addCustom(event)">
-      <input type="text" id="tagId" placeholder="Tag ID (e.g. 10151999)" maxlength="8" inputmode="numeric" pattern="\\d{8}" required>
+      <input type="text" id="tagId" placeholder="Tag ID (e.g. 10151999)" maxlength="8" inputmode="numeric" pattern="[0-9]{8}" required>
       <input type="text" id="tagLocation" placeholder="Location (e.g. Security Office)" required>
       <select id="tagFloor" required>
         {% for floor in zones_data.keys() %}
@@ -183,7 +183,7 @@ HTML = """
 
 <script>
   // --- Simple state ---
-  const totalZones = {{ sum(len(z) for z in zones_data.values()) }};
+  const totalZones = {{ total_zones }};
   let visited = new Set();
   const zoneList = document.getElementById('zoneList');
   const floorSelect = document.getElementById('floorSelect');
@@ -248,9 +248,7 @@ HTML = """
       btn.disabled = true;
       btn.textContent = 'Hold tag to phone...';
       const ndef = new NDEFReader();
-      // Simplest form: write text payload with the zone ID.
-      // This prompts the user to tap a tag and writes once detected.
-      await ndef.write(zoneId);
+      await ndef.write(zoneId); // writes a text record
       markVisited(zoneId);
       showToast('✅ Written: ' + zoneId, true);
       btn.textContent = 'Write to NFC Tag';
@@ -258,7 +256,6 @@ HTML = """
       console.error(err);
       btn.textContent = 'Write to NFC Tag';
       let msg = err && err.name ? err.name + ': ' + (err.message || '') : (err.message || 'NFC error');
-      // Friendlier mapping
       if (err.name === 'NotAllowedError') msg = 'NFC permission denied. Try tapping again and allow.';
       if (err.name === 'NotSupportedError') msg = 'Device/Browser does not support NFC or it is disabled.';
       if (err.name === 'SecurityError') msg = 'Web NFC requires HTTPS (except http://localhost).';
@@ -269,14 +266,14 @@ HTML = """
     }
   }
 
-  // --- Add custom tag (UI only; persists in memory server-side) ---
+  // --- Add custom tag ---
   async function addCustom(e) {
     e.preventDefault();
     const id = document.getElementById('tagId').value.trim();
     const location = document.getElementById('tagLocation').value.trim();
     const floor = document.getElementById('tagFloor').value;
 
-    if (!/^\d{8}$/.test(id)) {
+    if (!/^[0-9]{8}$/.test(id)) {
       showToast('Tag ID must be exactly 8 digits.', false);
       return false;
     }
@@ -290,7 +287,6 @@ HTML = """
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to add tag');
 
-      // Create card in UI
       const card = document.createElement('div');
       card.className = 'card';
       card.dataset.floor = floor;
@@ -303,11 +299,8 @@ HTML = """
         </div>
         <div><button class="write" onclick="writeNFC('${escapeAttr(id)}')">Write to NFC Tag</button></div>
       `;
-      zoneList.appendChild(card);
+      document.getElementById('zoneList').appendChild(card);
 
-      // Recompute totals (client uses fixed totalZones for progress bar width;
-      // for simplicity we keep bar relative to initial total plus customs visually.
-      // If you want exact math, replace totalZones server-side to include customs on reload.)
       document.getElementById('tagId').value = '';
       document.getElementById('tagLocation').value = '';
       showToast('Custom tag added.', true);
@@ -324,20 +317,20 @@ HTML = """
 
   // --- Init ---
   document.addEventListener('DOMContentLoaded', () => {
+    const httpsOk = (location.protocol === 'https:') || (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+    if (!httpsOk) document.getElementById('envHint').textContent = '⚠️ Use HTTPS (or http://localhost) for NFC';
+
     // Default to first floor
-    floorSelect.value = floorSelect.options[0].value;
+    const fs = document.getElementById('floorSelect');
+    fs.value = fs.options[0].value;
+    fs.addEventListener('change', filterByFloor);
     filterByFloor();
 
-    // Environment hint
-    const hint = document.getElementById('envHint');
-    const httpsOk = (location.protocol === 'https:') || (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
-    if (!httpsOk) hint.textContent = '⚠️ Use HTTPS (or http://localhost) for NFC';
-
-    // Load any custom tags from server (optional: when reloading)
+    // Re-add any custom tags on reload
     fetch('/get_custom_tags').then(r=>r.json()).then(data=>{
       if (!data.tags) return;
+      const zoneList = document.getElementById('zoneList');
       for (const t of data.tags) {
-        // Skip if already present
         if (document.getElementById('zone-' + t.id)) continue;
         const card = document.createElement('div');
         card.className = 'card';
@@ -355,8 +348,6 @@ HTML = """
       }
       filterByFloor();
     }).catch(()=>{});
-
-    floorSelect.addEventListener('change', filterByFloor);
   });
 </script>
 </body>
@@ -365,7 +356,8 @@ HTML = """
 
 @app.route("/")
 def index():
-    return render_template_string(HTML, zones_data=zones_data)
+    total = sum(len(z) for z in zones_data.values())
+    return render_template_string(HTML, zones_data=zones_data, total_zones=total)
 
 @app.route("/mark_visited", methods=["POST"])
 def mark_visited():
@@ -373,7 +365,6 @@ def mark_visited():
     zone_id = data.get("zoneId")
     if zone_id:
         visited_zones[zone_id] = {"timestamp": datetime.now().isoformat(), "visited": True}
-        # also reflect in zones_data if present
         for floor, zones in zones_data.items():
             for z in zones:
                 if z["id"] == zone_id:
@@ -388,7 +379,6 @@ def add_custom_tag():
     floor = (data.get("floor") or "").strip()
     if not (tag_id and location and floor):
         return jsonify({"success": False, "error": "Missing required fields"})
-    # simple 8-digit check (relax if you use other IDs)
     if not tag_id.isdigit() or len(tag_id) != 8:
         return jsonify({"success": False, "error": "Tag ID must be exactly 8 digits"})
     custom_zones.setdefault(floor, []).append({"id": tag_id, "location": location, "visited": False})
