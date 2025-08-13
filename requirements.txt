@@ -1,2 +1,5 @@
 Flask>=3,<4
 gunicorn>=21,<23
+mediapipe>=0.10
+opencv-python-headless>=4.9
+numpy>=1.26
